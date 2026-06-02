@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+stage1/venv/
+
+# Generated outputs (pipeline artifacts)
+stage1/output/
+stage2/output/
+
+# Logs
+stage1/logs/
+stage2/logs/
+
+# Input files (PDFs, source DOCXs)
+input/
+
+# Temp files
+~$*.docx
+*.tmp
