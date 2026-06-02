@@ -1,4 +1,4 @@
-# CLAUDE.md <!-- version: v1.1 -->
+# CLAUDE.md <!-- version: v2.0 -->
 
 ## Maintenance Rule
 
