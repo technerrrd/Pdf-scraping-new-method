@@ -14,9 +14,12 @@ import re
 import shutil
 import zipfile
 import logging
+import textwrap
 from datetime import datetime
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+TEMPLATE_DIR = Path(__file__).parent.parent / 'Final-lyx_template'
 
 # ---------------------------------------------------------------------------
 # XML namespaces
@@ -81,7 +84,7 @@ def segments_text(segments) -> str:
 # Noise / TOC / chapter / heading-numbering detection
 # ---------------------------------------------------------------------------
 TOC_RE     = re.compile(r'^\d+\.\s+\S')
-CHAPTER_RE = re.compile(r'^Chapter\s+Notes?\s*:\s*(.+)', re.IGNORECASE)
+CHAPTER_RE = re.compile(r'^Chapter\s+Notes?\s*[:\-]\s*(.+)', re.IGNORECASE)
 HEADING_NUM_RE = re.compile(
     r'^(?:'
     r'Q\d+\.?\s+'            # Q1 / Q1. / Q12
@@ -501,6 +504,144 @@ LYX_FOOTER = """\
 \\end_document
 """
 
+# ---------------------------------------------------------------------------
+# Template integration helpers
+# ---------------------------------------------------------------------------
+def load_template_prefix(template_dir: Path) -> str:
+    """Read main.lyx verbatim up to and including the TOC/pagestyle block."""
+    text = (template_dir / 'main.lyx').read_text(encoding='utf-8')
+    marker = '% Print headers again'
+    idx = text.find(marker)
+    if idx == -1:
+        raise ValueError("Marker '% Print headers again' not found in main.lyx")
+    # Skip past: \end_layout (Plain Layout) → \end_inset → \end_layout (Standard)
+    end_inset = text.find('\\end_inset', idx)
+    end_layout = text.find('\\end_layout', end_inset)
+    return text[:end_layout + len('\\end_layout')] + '\n\n'
+
+
+def chapterimage_block(filename: str) -> str:
+    """Return the LyX ERT block for \\chapterimage{filename}."""
+    return (
+        '\\begin_layout Standard\n'
+        '\\begin_inset ERT\n'
+        'status open\n'
+        '\n'
+        '\\begin_layout Plain Layout\n'
+        '\n'
+        '\n'
+        '\\backslash\n'
+        'chapterimage\n'
+        '\\end_layout\n'
+        '\n'
+        '\\end_inset\n'
+        '\n'
+        '\n'
+        '\\begin_inset ERT\n'
+        'status collapsed\n'
+        '\n'
+        '\\begin_layout Plain Layout\n'
+        '\n'
+        '{\n'
+        '\\end_layout\n'
+        '\n'
+        '\\end_inset\n'
+        '\n'
+        f'{filename}\n'
+        '\\begin_inset ERT\n'
+        'status collapsed\n'
+        '\n'
+        '\\begin_layout Plain Layout\n'
+        '\n'
+        '}\n'
+        '\\end_layout\n'
+        '\n'
+        '\\end_inset\n'
+        '\n'
+        ' \n'
+        '\\begin_inset ERT\n'
+        'status collapsed\n'
+        '\n'
+        '\\begin_layout Plain Layout\n'
+        '\n'
+        '% Chapter heading image\n'
+        '\\end_layout\n'
+        '\n'
+        '\\end_inset\n'
+        '\n'
+        '\n'
+        '\\end_layout\n'
+        '\n'
+    )
+
+
+def generate_chapter_image(chapter_name: str, out_path: Path) -> None:
+    """Generate a 1840×920 banner PNG for a chapter heading."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    W, H = 1840, 920
+    OCRE = (243, 102, 25)
+    DARK = (160, 60, 10)
+
+    img = Image.new('RGB', (W, H))
+    draw = ImageDraw.Draw(img)
+
+    # Left-to-right gradient: dark → ocre → dark
+    for x in range(W):
+        t = x / (W - 1)
+        blend = 1 - abs(t * 2 - 1)   # 0 at edges, 1 at centre
+        r = int(DARK[0] + (OCRE[0] - DARK[0]) * blend)
+        g = int(DARK[1] + (OCRE[1] - DARK[1]) * blend)
+        b = int(DARK[2] + (OCRE[2] - DARK[2]) * blend)
+        draw.line([(x, 0), (x, H - 1)], fill=(r, g, b))
+
+    # Load a bold font with fallback chain
+    font_size = 90
+    font = None
+    for fp in [
+        '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+        '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+        '/usr/share/fonts/noto/NotoSans-Bold.ttf',
+    ]:
+        if Path(fp).exists():
+            font = ImageFont.truetype(fp, font_size)
+            break
+    if font is None:
+        font = ImageFont.load_default()
+
+    # Wrap long names and draw each line centred
+    wrapped_lines = textwrap.wrap(chapter_name, width=24) or [chapter_name]
+    line_h = font_size + 14
+    total_h = len(wrapped_lines) * line_h
+    y = (H - total_h) // 2
+
+    for line in wrapped_lines:
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_w = bbox[2] - bbox[0]
+        draw.text(((W - text_w) // 2, y), line, fill=(255, 255, 255), font=font)
+        y += line_h
+
+    img.save(str(out_path))
+
+
+def copy_template_assets(template_dir: Path, out_dir: Path) -> None:
+    """Copy Legrand template assets into the output directory."""
+    for asset in ('background.pdf', 'chapterhead1.pdf', 'bibliography.bib',
+                  'StyleInd.ist', 'placeholder.jpg'):
+        src = template_dir / asset
+        if src.exists():
+            shutil.copy2(src, out_dir / asset)
+
+    # Copy structure.tex with graphicspath patched to current directory
+    structure = (template_dir / 'structure.tex').read_text(encoding='utf-8')
+    structure = structure.replace(
+        r'\graphicspath{{Pictures/}}',
+        r'\graphicspath{{./}}'
+    )
+    (out_dir / 'structure.tex').write_text(structure, encoding='utf-8')
+
+
 def lyx_escape(text: str) -> str:
     """Escape backslashes for LyX plain layout."""
     return text.replace('\\', '\\backslash\n')
@@ -523,9 +664,13 @@ def render_lyx_segments(segments) -> str:
         parts.append('\n\\series default\n')
     return ''.join(parts)
 
-def write_lyx(elements, out_path: Path, media_dir: Path):
-    lines = [LYX_HEADER]
+def write_lyx(elements, out_path: Path, media_dir: Path, template_dir: Path = None):
+    if template_dir is not None:
+        lines = [load_template_prefix(template_dir)]
+    else:
+        lines = [LYX_HEADER]
     in_enum = False
+    chapter_idx = 0
 
     def close_enum():
         nonlocal in_enum
@@ -549,6 +694,11 @@ def write_lyx(elements, out_path: Path, media_dir: Path):
             lvl = el['level']
             layout = {'chapter': 'Chapter', 'section': 'Section',
                       'subsection': 'Subsection'}.get(lvl, 'Section')
+            if lvl == 'chapter' and template_dir is not None:
+                chapter_idx += 1
+                img_name = f'chapterhead_Ch{chapter_idx}.png'
+                generate_chapter_image(el['text'], out_path.parent / img_name)
+                lines.append(chapterimage_block(img_name))
             lines.append(f'\\begin_layout {layout}\n')
             lines.append(f'{el["text"]}\n')
             lines.append('\\end_layout\n\n')
@@ -598,7 +748,10 @@ def write_lyx(elements, out_path: Path, media_dir: Path):
             lines.append('\\end_inset\n\n')
             lines.append('\\end_layout\n\n')
 
-    lines.append(LYX_FOOTER)
+    if template_dir is not None:
+        lines.append('\\end_body\n\\end_document\n')
+    else:
+        lines.append(LYX_FOOTER)
     out_path.write_text(''.join(lines), encoding='utf-8')
 
 # ---------------------------------------------------------------------------
@@ -635,8 +788,13 @@ def convert(docx_path: Path, base_dir: Path, logger: logging.Logger):
     logger.info(f'  Wrote {tex_path}')
 
     lyx_path = out_dir / f'{stem}.lyx'
-    write_lyx(elements, lyx_path, media_dir)
+    t_dir = TEMPLATE_DIR if TEMPLATE_DIR.exists() else None
+    write_lyx(elements, lyx_path, media_dir, template_dir=t_dir)
     logger.info(f'  Wrote {lyx_path}')
+
+    if t_dir is not None:
+        copy_template_assets(t_dir, out_dir)
+        logger.info(f'  Copied template assets to {out_dir}')
 
     counts = {t: sum(1 for e in elements if e['type'] == t)
               for t in ('heading', 'body', 'mcq', 'image')}
