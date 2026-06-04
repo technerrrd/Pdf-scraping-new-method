@@ -633,11 +633,19 @@ def copy_template_assets(template_dir: Path, out_dir: Path) -> None:
         if src.exists():
             shutil.copy2(src, out_dir / asset)
 
-    # Copy structure.tex with graphicspath patched to current directory
+    # Copy structure.tex with patches:
+    # 1. graphicspath → current directory
+    # 2. Remove biblatex block (no citations in notes docs → suppresses BibTeX errors)
     structure = (template_dir / 'structure.tex').read_text(encoding='utf-8')
     structure = structure.replace(
         r'\graphicspath{{Pictures/}}',
         r'\graphicspath{{./}}'
+    )
+    structure = re.sub(
+        r'\\usepackage\{csquotes\}.*?\\defbibheading\{bibempty\}\{\}',
+        '',
+        structure,
+        flags=re.DOTALL
     )
     (out_dir / 'structure.tex').write_text(structure, encoding='utf-8')
 
@@ -736,15 +744,9 @@ def write_lyx(elements, out_path: Path, media_dir: Path, template_dir: Path = No
             scale_pct = int(el['scale'] * 100)
             lines.append('\\begin_layout Standard\n')
             lines.append('\\align center\n')
-            lines.append('\\begin_inset Float figure\n')
-            lines.append('placement h\nwide false\nsideways false\nstatus open\n\n')
-            lines.append('\\begin_layout Plain Layout\n')
-            lines.append('\\align center\n')
             lines.append('\\begin_inset Graphics\n')
             lines.append(f'\tfilename media/{fname}\n')
             lines.append(f'\twidth {scale_pct}text%\n')
-            lines.append('\\end_inset\n\n')
-            lines.append('\\end_layout\n\n')
             lines.append('\\end_inset\n\n')
             lines.append('\\end_layout\n\n')
 
