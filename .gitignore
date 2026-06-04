@@ -21,3 +21,15 @@ input/
 # Temp files
 ~$*.docx
 *.tmp
+
+# LyX backup files
+*.lyx~
+
+# Duplicate download artifacts
+*placeholder(1)*
+
+# Intermediate DOCX files placed in stage2/ for conversion
+stage2/*.docx
+
+# Claude internal memory (not project source)
+.claude/
