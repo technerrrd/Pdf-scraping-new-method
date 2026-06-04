@@ -7,7 +7,9 @@ from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from collections import deque
 from PIL import Image
+from io import BytesIO
 import re
+import json
 import logging
 import os
 import glob
@@ -18,6 +20,7 @@ import shutil
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))        # .../stage1/
 _COMBINED_DIR = os.path.dirname(_SCRIPT_DIR)                     # .../final-combined-pdf-to-lyx/
 _PROJECT_ROOT = os.path.join(_COMBINED_DIR, 'input')             # .../input/  (PDF+DOCX drop zone)
+_SCRAPED_DIR = os.path.join(_PROJECT_ROOT, 'scraped')           # .../input/scraped/  (Stage 0 cache)
 _OUTPUT_DIR = os.path.join(_SCRIPT_DIR, 'output')               # .../stage1/output/
 _LOGS_DIR = os.path.join(_SCRIPT_DIR, 'logs')                   # .../stage1/logs/
 os.makedirs(_OUTPUT_DIR, exist_ok=True)
@@ -48,6 +51,58 @@ _LIGATURES = {
     'ﬅ': 'st',
     'ﬆ': 'st',
 }
+
+def _normalize_chapter_name(text):
+    """Normalize a chapter name/heading for fuzzy comparison.
+
+    Strips the 'Chapter Notes:' / 'Chapter N' prefixes and punctuation, lowercases,
+    and collapses whitespace so PDF headings (sometimes truncated mid-line) can be
+    loosely matched against the scraped-manifest names.
+    """
+    t = text.lower()
+    t = re.sub(r'chapter\s+notes\s*[:\-]?', ' ', t)
+    t = re.sub(r'chapter\s+\d+', ' ', t)
+    t = re.sub(r'[^a-z0-9]+', ' ', t)
+    return ' '.join(t.split())
+
+
+def _load_scraped_image_list(folder):
+    """Return Stage-0 scraped images in a chapter folder, numeric-sorted and filtered."""
+    if not os.path.isdir(folder):
+        return []
+    imgs = glob.glob(os.path.join(folder, 'image*'))
+    imgs.sort(key=lambda x: int(''.join(filter(str.isdigit, os.path.basename(x))) or 0))
+    # Drop any zero-byte / tiny stray files (same threshold as the DOCX-zip filter)
+    return [p for p in imgs if os.path.getsize(p) >= 1000]
+
+
+def _collect_all_scraped_images():
+    """Concatenate every chapter's scraped images in manifest (document) order.
+
+    Used by the single-file convert() path, where pages flow chapter-by-chapter in
+    order, so the concatenated list aligns 1:1 with the document's image slots.
+    Returns the combined list, or None if the manifest is missing or any chapter
+    folder is empty (→ caller falls back to DOCX-zip images).
+    """
+    manifest_path = os.path.join(_SCRAPED_DIR, 'manifest.json')
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, encoding='utf-8') as fh:
+            manifest = json.load(fh)
+    except Exception as exc:
+        logger.warning(f"Could not read scraped manifest ({exc}) → DOCX-zip fallback.")
+        return None
+    all_imgs = []
+    for entry in manifest:
+        imgs = _load_scraped_image_list(os.path.join(_SCRAPED_DIR, entry.get('folder', '')))
+        if not imgs:
+            logger.warning(f"Scraped folder empty/missing for {entry.get('folder')} "
+                           f"→ DOCX-zip fallback.")
+            return None
+        all_imgs.extend(imgs)
+    return all_imgs
+
 
 class DocumentConverter:
     """Convert PDF to standardized DOCX format."""
@@ -445,10 +500,21 @@ class DocumentConverter:
 
     def insert_image(self, doc, image_path, width=None):
         """Insert image with NO spacing."""
+        w = width if width is not None else Inches(5.5)
         try:
             para = doc.add_paragraph()
             run = para.add_run()
-            run.add_picture(image_path, width=width if width is not None else Inches(5.5))
+            try:
+                run.add_picture(image_path, width=w)
+            except Exception:
+                # Some web JPEGs (EduRev CDN) start with a DQT marker and lack the
+                # JFIF/EXIF header python-docx requires, raising UnrecognizedImageError.
+                # Normalize through PIL into a proper JPEG in memory and retry.
+                with Image.open(image_path) as im:
+                    buf = BytesIO()
+                    im.convert('RGB').save(buf, format='JPEG', quality=95)
+                buf.seek(0)
+                run.add_picture(buf, width=w)
             para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
             # CRITICAL: Set spacing to ZERO (no white lines)
@@ -488,8 +554,15 @@ class DocumentConverter:
         logger.info("=" * 70)
 
         try:
-            # Extract images from DOCX zip
-            self.extract_images_from_docx_zip()
+            # Image source: Stage-0 scraped web images if available, else DOCX zip
+            scraped_all = _collect_all_scraped_images()
+            if scraped_all is not None:
+                logger.info(f"IMAGE SOURCE: Stage-0 scraped web images ({len(scraped_all)})")
+                source_imgs = scraped_all
+            else:
+                logger.info("IMAGE SOURCE: DOCX-zip images (fallback)")
+                self.extract_images_from_docx_zip()
+                source_imgs = self.image_files
 
             # Create new document
             doc = Document()
@@ -515,8 +588,8 @@ class DocumentConverter:
             # Build 1:1 assignment: each active PDF slot gets the Nth DOCX image.
             # This guarantees all DOCX images are spread evenly throughout the document
             # regardless of dimension differences between PDF and DOCX image versions.
-            docx_imgs_list = self.image_files  # already filtered and sorted
-            img_assignment = {}  # (pnum, xref) -> docx_image_path
+            docx_imgs_list = source_imgs  # scraped web images, or DOCX-zip fallback
+            img_assignment = {}  # (pnum, xref) -> image_path
             for i, (pnum, xref) in enumerate(active_slots_ordered):
                 if i < len(docx_imgs_list):
                     img_assignment[(pnum, xref)] = docx_imgs_list[i]
@@ -560,7 +633,7 @@ class DocumentConverter:
             doc.save(self.output_path)
 
             logger.info("=" * 70)
-            logger.info(f"✓ Complete! Images used: {self.image_index}/{len(self.image_files)}")
+            logger.info(f"✓ Complete! Images used: {self.image_index}/{len(docx_imgs_list)}")
             logger.info("=" * 70)
 
         finally:
@@ -613,6 +686,69 @@ class DocumentConverter:
             img_width = Inches(min(pdf_in, CONTENT_WIDTH_INCHES)) if pdf_in > 0 else Inches(5.5)
             self.insert_image(doc, img_path, width=img_width)
 
+    def _resolve_scraped_images(self, chapters):
+        """Map each chapter to its Stage-0 scraped image list (document order).
+
+        Returns {chapter_name: [paths]} when EVERY chapter resolves to a non-empty
+        scraped folder; otherwise None to signal full DOCX-zip fallback. The PDF
+        chapters and the scraped manifest are both in document order, so mapping is
+        positional; chapter names are compared only as a sanity check (PDF headings
+        are sometimes truncated mid-line, so order — not name — is authoritative).
+        """
+        manifest_path = os.path.join(_SCRAPED_DIR, 'manifest.json')
+        if not os.path.exists(manifest_path):
+            logger.info("No Stage-0 manifest found → using DOCX-zip images.")
+            return None
+        try:
+            with open(manifest_path, encoding='utf-8') as fh:
+                manifest = json.load(fh)
+        except Exception as exc:
+            logger.warning(f"Could not read scraped manifest ({exc}) → DOCX-zip fallback.")
+            return None
+
+        if len(manifest) != len(chapters):
+            logger.warning(
+                f"Scraped chapters ({len(manifest)}) != detected chapters ({len(chapters)}) "
+                f"→ DOCX-zip fallback.")
+            return None
+
+        resolved = {}
+        for ch, entry in zip(chapters, manifest):
+            folder = os.path.join(_SCRAPED_DIR, entry['folder'])
+            imgs = _load_scraped_image_list(folder)
+            if not imgs:
+                logger.warning(f"Scraped folder empty/missing for '{ch['name']}' ({folder}) "
+                               f"→ DOCX-zip fallback.")
+                return None
+            pdf_tokens = set(_normalize_chapter_name(ch['name']).split())
+            web_tokens = set(_normalize_chapter_name(entry.get('name', '')).split())
+            if pdf_tokens & web_tokens:
+                logger.info(f"Chapter map: '{ch['name']}' ↔ web '{entry.get('name')}' "
+                            f"({len(imgs)} scraped imgs)")
+            else:
+                logger.warning(
+                    f"Name mismatch (order map): PDF '{ch['name']}' ↔ web '{entry.get('name')}' "
+                    f"— proceeding by document order.")
+            resolved[ch['name']] = imgs
+        return resolved
+
+    def _insert_scraped_image_item(self, item, page_num, doc, split_set, queue):
+        """Place the next scraped image at this PDF image slot (1:1, in order).
+
+        Scraped images are clean and unsplit, so no dimension matching is needed —
+        the PDF slot only supplies the position and intended display width. Split
+        continuations are still skipped so one real image maps to one slot.
+        """
+        if (page_num, item['xref']) in split_set:
+            return
+        if not queue:
+            logger.warning(f"Scraped queue exhausted at page {page_num + 1} — slot left empty.")
+            return
+        img_path = queue.popleft()
+        pdf_in = item['pdf_pt_w'] / 72.0 if item.get('pdf_pt_w') else 0
+        width = Inches(min(pdf_in, CONTENT_WIDTH_INCHES)) if pdf_in > 0 else Inches(CONTENT_WIDTH_INCHES)
+        self.insert_image(doc, img_path, width=width)
+
     def convert_chapters(self, chapters):
         """Convert a multi-chapter PDF into separate DOCX files.
 
@@ -621,13 +757,22 @@ class DocumentConverter:
           start_page - first page (1-based, inclusive)
           end_page   - last page (1-based, inclusive)
           output_path - where to save this chapter's DOCX
+
+        Image source: if Stage 0 scraped images exist for ALL chapters, use those
+        (full-size, never split); otherwise fall back to DOCX-zip extraction.
         """
         logger.info("=" * 70)
         logger.info(f"Starting chapter split conversion ({len(chapters)} chapters)")
         logger.info("=" * 70)
 
         try:
-            self.extract_images_from_docx_zip()
+            scraped = self._resolve_scraped_images(chapters)
+            use_scraped = scraped is not None
+            if use_scraped:
+                logger.info("IMAGE SOURCE: Stage-0 scraped web images (per chapter)")
+            else:
+                logger.info("IMAGE SOURCE: DOCX-zip images (fallback)")
+                self.extract_images_from_docx_zip()
 
             pdf_doc = fitz.open(self.pdf_path)
             logger.info(f"PDF: {len(pdf_doc)} pages")
@@ -635,10 +780,15 @@ class DocumentConverter:
             split_set, pdf_img_dims, _active_slots = self._scan_pdf_image_slots(pdf_doc)
             logger.info(f"Split/logo slots to skip: {len(split_set)}")
 
-            docx_queue = deque(
-                (img_path, self._get_docx_img_dims(img_path))
-                for img_path in self.image_files
-            )
+            if use_scraped:
+                ch_queues = {ch['name']: deque(scraped[ch['name']]) for ch in chapters}
+                docx_queue = None
+            else:
+                ch_queues = None
+                docx_queue = deque(
+                    (img_path, self._get_docx_img_dims(img_path))
+                    for img_path in self.image_files
+                )
 
             # Build page→chapter lookup
             page_to_ch = {}
@@ -664,16 +814,29 @@ class DocumentConverter:
                     if item['type'] == 'text':
                         self.add_text_paragraph(doc, item['runs'], item['size'], item['color'], item['bold'])
                     elif item['type'] == 'image':
-                        self._process_image_item(item, page_num, doc, split_set, docx_queue)
+                        if use_scraped:
+                            self._insert_scraped_image_item(item, page_num, doc, split_set, ch_queues[ch_name])
+                        else:
+                            self._process_image_item(item, page_num, doc, split_set, docx_queue)
 
             pdf_doc.close()
 
-            # Flush any remaining DOCX images into the last chapter
-            last_doc = ch_docs[chapters[-1]['name']]
-            while docx_queue:
-                orphan_path, _ = docx_queue.popleft()
-                logger.info(f"Trailing orphan → last chapter: {os.path.basename(orphan_path)}")
-                self.insert_image(last_doc, orphan_path, width=Inches(CONTENT_WIDTH_INCHES))
+            if use_scraped:
+                # Append any scraped images beyond a chapter's PDF slot count
+                for ch in chapters:
+                    q = ch_queues[ch['name']]
+                    cdoc = ch_docs[ch['name']]
+                    while q:
+                        img_path = q.popleft()
+                        logger.info(f"Trailing scraped → {ch['name']}: {os.path.basename(img_path)}")
+                        self.insert_image(cdoc, img_path, width=Inches(CONTENT_WIDTH_INCHES))
+            else:
+                # Flush any remaining DOCX images into the last chapter
+                last_doc = ch_docs[chapters[-1]['name']]
+                while docx_queue:
+                    orphan_path, _ = docx_queue.popleft()
+                    logger.info(f"Trailing orphan → last chapter: {os.path.basename(orphan_path)}")
+                    self.insert_image(last_doc, orphan_path, width=Inches(CONTENT_WIDTH_INCHES))
 
             # Save each chapter
             output_paths = []

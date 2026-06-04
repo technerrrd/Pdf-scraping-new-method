@@ -1,4 +1,4 @@
-# CLAUDE.md <!-- version: v2.1 -->
+# CLAUDE.md <!-- version: v3.0 -->
 
 ## Maintenance Rule
 
@@ -17,14 +17,18 @@
 
 ## Pipeline Overview
 
-This project converts EduRev teaching notes (PDF + DOCX pairs) into clean, typeset `.tex` and `.lyx` files through a two-stage pipeline:
+This project converts EduRev teaching notes (PDF + DOCX pairs) into clean, typeset `.tex` and `.lyx` files. As of **v3.0**, images are scraped full-size from the original EduRev web pages (Stage 0) instead of extracted from the PDF/DOCX, eliminating the half-image splitting that occurred when images straddled a Firefox page break:
 
 ```
-[Input: PDF + DOCX pair]
+[Input: PDF + DOCX pair  +  CHAPTER-LINKS]
+        ↓
+  Stage 0: Scrape images from web  (NEW in v3.0)
+  (read CHAPTER-LINKS, fetch each chapter's EduRev page,
+   download full-size content images → input/scraped/)
         ↓
   Stage 1: PDF → DOCX
-  (extract text from PDF, images from DOCX zip,
-   produce clean formatted Word document)
+  (text from PDF; images from input/scraped/ if present,
+   else DOCX zip; produce clean formatted Word document)
         ↓
   Stage 2: DOCX → LyX/TeX
   (parse formatted DOCX, emit .tex and .lyx files
@@ -44,6 +48,9 @@ This project converts EduRev teaching notes (PDF + DOCX pairs) into clean, types
 ```
 final-combined-pdf-to-lyx/
 ├── CLAUDE.md
+├── stage0/                    ← web image scraper (NEW in v3.0)
+│   ├── scrape_images.py
+│   └── logs/
 ├── stage1/                    ← PDF → DOCX conversion
 │   ├── convert_document_v4.py
 │   ├── analyze_document.py
@@ -55,11 +62,22 @@ final-combined-pdf-to-lyx/
 │   ├── output/                ← .tex, .lyx, media/ land here
 │   └── logs/
 └── input/                     ← drop PDF + DOCX input pairs here
+    ├── CHAPTER-LINKS          ← chapter → EduRev URL map (Stage 0 input)
+    └── scraped/               ← Stage 0 image cache + manifest.json
 ```
 
 ### Common Commands
 
 ```bash
+# === STAGE 0 (NEW in v3.0) ===
+# Activate the venv (shared with Stage 1) — needs `requests`
+source stage1/venv/bin/activate
+
+# Scrape full-size chapter images from EduRev pages listed in input/CHAPTER-LINKS
+python stage0/scrape_images.py
+# → downloads to input/scraped/Chapter<N>/, writes manifest.json, prints per-chapter
+#   counts, then STOPS. Review/prune the images before running Stage 1.
+
 # === STAGE 1 ===
 # Activate Stage 1 venv
 source stage1/venv/bin/activate
@@ -81,6 +99,50 @@ python stage2/convert.py Chapter10.docx Chapter11.docx
 
 ---
 
+# Stage 0: Web Image Scrape (NEW in v3.0)
+
+## Why
+
+EduRev PDFs are pages printed from Firefox. Images that straddle a page break get
+split into two halves, and Stage 1 carried complex split-detection logic to cope —
+still imperfect. The **original EduRev web pages** host every content image full-size
+on a CDN, in reading order, in server-rendered HTML (no JavaScript). Stage 0 fetches
+those clean images so Stage 1 never has to deal with split halves.
+
+## Input: `input/CHAPTER-LINKS`
+
+One line per chapter: `<idx>\t<EduRev URL> - Chapter<N>`. The scraper extracts the
+URL, the chapter number `<N>`, and the chapter name (from the URL slug).
+
+## How `stage0/scrape_images.py` works
+
+1. Parse `CHAPTER-LINKS` into ordered `{num, name, url}` entries.
+2. `GET` each page with a desktop User-Agent (polite ~1.5s delay between pages).
+3. Extract content image URLs by the path filter
+   **`ApplicationImages/Temp/<UUID>_lg.jpg`** — this uniquely identifies uploaded
+   content images. ALL page chrome (icons/ads/course thumbnails/favicons) lives on
+   other CDN paths (`cdn_assets/`, `cdn_lib/`, `CourseImages/`, `..._icon.jpg`), so the
+   single path filter cleanly separates content from junk. Dedupe, preserve order.
+   **Do NOT scope to the visible content `<div>`** (`explr_htmlcnt_dv`) — it appears
+   *after* the images in the markup, so scoping by it drops everything.
+4. Download to `input/scraped/Chapter<N>/image1.jpg, image2.jpg, …` (numeric order so
+   Stage 1's sort works). Skips files already present (cache).
+5. Write `input/scraped/manifest.json` (`[{num, name, url, folder, image_count, files}]`)
+   and print per-chapter counts, then **STOP** (review gate). Inspect/prune, then
+   run Stage 1.
+
+## Notes
+
+- Dependency: `requests` (in the Stage 1 venv).
+- Images are downloaded as-is; these EduRev JPEGs sometimes start with a DQT marker
+  and lack a JFIF/EXIF header, which makes `python-docx` raise `UnrecognizedImageError`.
+  Stage 1's `insert_image()` handles this by re-encoding through PIL on failure — do
+  not remove that fallback.
+- If a chapter's scrape fails or yields zero images, Stage 1 falls back to DOCX-zip
+  images for the whole document (see Stage 1 image-source rule).
+
+---
+
 # Stage 1: PDF → DOCX
 
 ## Why Both Input Files Are Needed
@@ -89,12 +151,12 @@ These documents are EduRev teaching notes printed from Firefox to PDF, then conv
 
 - **DOCX text is inaccessible:** All text lives inside text boxes/shapes which `python-docx` cannot read. DOCX paragraphs contain only images and empty lines — zero readable text.
 - **PDF is the only text source:** All text must be extracted from the PDF using `pymupdf`.
-- **DOCX is the only image source:** Images must come from the DOCX zip. PDF images are sometimes split in half across page boundaries.
+- **Image source (v3.0):** Images come from **Stage 0 web scrape** (`input/scraped/`) when available — these are full-size and never split. If no scrape exists, Stage 1 falls back to the **DOCX zip** (legacy behavior). PDF images are never used as a source (they are sometimes split in half across page boundaries; the PDF only supplies image *positions*).
 
 **Text:** Extract from PDF ONLY  
-**Images:** Extract from DOCX zip ONLY (never from PDF)
+**Images:** Stage-0 scraped web images (primary) → DOCX zip (fallback). Never from the PDF.
 
-**Workflow:** Build a brand new DOCX from scratch — text from PDF, images from DOCX zip, processed page by page in reading order.
+**Workflow:** Build a brand new DOCX from scratch — text from PDF, images from `input/scraped/` (or DOCX zip), processed page by page in reading order. The PDF's image slots (page + reading-order position) determine *where* each image lands; the scraped list supplies *which* image (1:1, in document order).
 
 ## Chapter Detection and Processing
 
@@ -153,27 +215,48 @@ These documents are EduRev teaching notes printed from Firefox to PDF, then conv
 
 ```bash
 source stage1/venv/bin/activate
-# Dependencies: pymupdf>=1.23.0, python-docx>=1.1.0, Pillow>=10.0.0
+# Dependencies: pymupdf>=1.23.0, python-docx>=1.1.0, Pillow>=10.0.0, requests (Stage 0)
 ```
+
+### Image Source Resolution (v3.0)
+
+Before building, Stage 1 picks an image source:
+- **`convert()` (single combined file):** `_collect_all_scraped_images()` concatenates
+  every chapter's `input/scraped/Chapter<N>/` images in `manifest.json` (document)
+  order. If the manifest is missing or any folder is empty → falls back to DOCX-zip.
+  The concatenated list is assigned 1:1 onto `active_slots_ordered`.
+- **`convert_chapters()` (split files):** `_resolve_scraped_images()` maps each chapter
+  to its scraped folder **positionally** (both the PDF chapters and the manifest are in
+  document order — chapter *names* are only a sanity check, since PDF headings are
+  sometimes truncated mid-line). Each chapter gets its own scraped deque, popped 1:1 at
+  that chapter's PDF image slots. All-or-nothing: if any chapter can't resolve, the
+  whole run falls back to DOCX-zip.
+
+When scraped images are used, the split-detection/dimension-matching logic still runs
+on the PDF to locate image *slots*, but scraped images are placed by simple in-order
+pop (`_insert_scraped_image_item`) — no dimension matching, because they are clean and
+never split.
 
 ### Implementation Approach
 
 `convert_document_v4.py` builds a brand new DOCX from scratch:
 
-1. **Extract images from DOCX zip** — unzip, read `word/media/`, sort by filename number. Filter: skip files under 1KB (watermarks) and PNG files with 270–330 × 90–130px (EduRev logo).
+1. **Resolve image source** — scraped web images (`input/scraped/`) if available, else
+   **extract from DOCX zip** — unzip, read `word/media/`, sort by filename number; filter out files under 1KB (watermarks) and PNG files with 270–330 × 90–130px (EduRev logo).
 
-2. **Pre-scan PDF images** — walk all pages with `pdf_doc.extract_image(xref)` to get pixel dimensions. Build `split_set` for: consecutive same-dimension slots (Firefox page-break splits) and logo-dimension slots. Build `pdf_img_dims` dict: `(page_num, xref) → (px_w, px_h, pdf_pt_w)`. Build `docx_queue` (deque) of DOCX image paths with their pixel dimensions.
+2. **Pre-scan PDF images** — walk all pages with `pdf_doc.extract_image(xref)` to get pixel dimensions. Build `split_set` for: consecutive same-dimension slots (Firefox page-break splits) and logo-dimension slots. Build `pdf_img_dims` dict: `(page_num, xref) → (px_w, px_h, pdf_pt_w)`. Build the image queue (per-chapter scraped deques, or one DOCX `docx_queue`).
 
 3. **Process PDF page by page** — for each page, extract text blocks AND image positions via `pymupdf`. Sort by y-coordinate. For text: skip artifacts and EduRev text, detect heading level, sanitize, add to document. For images: check split_set and queue.
 
 4. **Image insertion (queue-based):**
    - If `(page_num, xref)` is in `split_set` → skip (Firefox split continuation)
-   - Otherwise: flush orphan DOCX images (if front of queue doesn't dimension-match, pop and insert as orphan — handles images in shapes pymupdf doesn't enumerate)
-   - Pop and insert the matched DOCX image
-   - After all pages: insert any remaining images from `docx_queue`
+   - **Scraped mode:** pop the next scraped image in order and insert (no dimension match)
+   - **DOCX-zip mode:** flush orphan images (if front of queue doesn't dimension-match, pop and insert as orphan — handles images in shapes pymupdf doesn't enumerate), then pop and insert the matched image
+   - After all pages: insert any remaining queued images (trailing — per chapter in scraped mode)
    - Insert with `space_before=Pt(0)`, `space_after=Pt(0)` — do NOT set `line_spacing_rule` on image paragraphs
+   - **`insert_image()` re-encodes through PIL on `add_picture` failure** — scraped EduRev JPEGs may lack the JFIF/EXIF header python-docx requires. Keep this fallback.
 
-5. **Image sizing** — `width = Inches(min(r.width / 72, 6.77))` where `6.77` is A4 content width (inches). Orphan images default to full content width. Only `width` is passed to `add_picture()`; height auto-scales.
+5. **Image sizing** — `width = Inches(min(r.width / 72, 6.77))` where `6.77` is A4 content width (inches). Orphan/trailing images default to full content width. Only `width` is passed to `add_picture()`; height auto-scales.
 
 6. **Text formatting** — detect heading levels from PDF font size/color/bold. Apply Times New Roman, black, correct sizes. Inline bold preserved via parallel `bold_chars` map (one entry per character from rawdict spans), propagated through ligature expansion, grouped into `runs = [(text, is_bold), …]`. Headings force all runs bold.
 

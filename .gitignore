@@ -12,6 +12,7 @@ stage1/output/
 stage2/output/
 
 # Logs
+stage0/logs/
 stage1/logs/
 stage2/logs/
 
