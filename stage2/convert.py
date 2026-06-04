@@ -882,7 +882,6 @@ def generate_chapter_image(chapter_name: str, out_path: Path) -> None:
     else:
         _draw_atom(ax)
 
-    _add_title(ax, chapter_name)
     plt.tight_layout(pad=0)
     plt.savefig(str(out_path), dpi=100, bbox_inches='tight',
                 facecolor=fig.get_facecolor())
