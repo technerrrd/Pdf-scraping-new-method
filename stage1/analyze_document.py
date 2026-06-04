@@ -33,8 +33,13 @@ def analyze_pdf(pdf_path):
                         flags = span["flags"]  # bit 4 = bold
                         is_bold = bool(flags & 16)
 
-                        # Detect chapter headings
-                        if text and re.search(r'chapter\s+\d+', text, re.IGNORECASE):
+                        # Detect chapter headings:
+                        # - "Chapter Notes: <name>" at 19-21pt (EduRev format)
+                        # - "Chapter <N>" numbered headings at any size
+                        is_chapter_notes = (19 <= size <= 21 and
+                                            re.search(r'chapter\s+notes\s*[:\-]', text, re.IGNORECASE))
+                        is_numbered_chapter = re.search(r'chapter\s+\d+', text, re.IGNORECASE)
+                        if text and (is_chapter_notes or is_numbered_chapter):
                             chapters.append({
                                 'text': text,
                                 'page': page_num + 1,
