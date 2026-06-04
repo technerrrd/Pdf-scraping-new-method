@@ -1,4 +1,4 @@
-# CLAUDE.md <!-- version: v2.0 -->
+# CLAUDE.md <!-- version: v2.1 -->
 
 ## Maintenance Rule
 
@@ -70,9 +70,6 @@ python stage1/analyze_document.py
 # Run Stage 1 conversion — splits into chapter files
 python stage1/convert_document_v4.py
 
-# Run Stage 1 — single output file
-python stage1/convert_document_v4.py single
-
 # === STAGE 2 ===
 # Convert all DOCX files placed in stage2/
 python stage2/convert.py
@@ -102,7 +99,7 @@ These documents are EduRev teaching notes printed from Firefox to PDF, then conv
 ## Chapter Detection and Processing
 
 **Process:**
-1. **Analyze document structure** — detect chapter boundaries by identifying Heading 1 text (19–21pt) containing "Chapter Notes:" or similar major section breaks.
+1. **Analyze document structure** — detect chapter boundaries by identifying Heading 1 text (19–21pt) containing "Chapter Notes:" or "Chapter Notes-" (colon or dash separator).
 2. **Confirm with user** — before processing, report findings:
    - "Found 1 chapter: Chapter 12 - Beyond Earth"
    - "Found 3 chapters: Chapter 10, Chapter 11, Chapter 12"
@@ -136,7 +133,7 @@ These documents are EduRev teaching notes printed from Firefox to PDF, then conv
 - **Tables:** Preserve structure; apply 12pt Times New Roman to all cells; simple grid borders (black, single line)
 
 ### Heading Detection (PDF font size → output heading)
-- **19–21pt** → Heading 1 (16pt bold black). Covers 21pt colored section titles and 19.5pt black "Chapter Notes: …" headings
+- **19–21pt** → Heading 1 (16pt bold black). Covers 21pt colored section titles and 19.5pt black "Chapter Notes: …" / "Chapter Notes- …" headings (colon or dash separator)
 - **16–17pt** → Heading 2 (14pt bold black). Range covers 16.5pt used in newer documents
 - **~13.5pt + bold + standalone** → Heading 3 (12pt bold black)
 - **~13.5pt normal** → Body text (12pt normal black)
@@ -600,15 +597,9 @@ Display: `\begin_inset Formula \n$$<MATH>$$\n\end_inset`
 \end{figure}
 ```
 
-**`.lyx` figure block (no caption):**
+**`.lyx` figure block (no caption, inline — no float wrapper):**
 ```
-\begin_inset Float figure
-placement h
-wide false
-sideways false
-status open
-
-\begin_layout Plain Layout
+\begin_layout Standard
 \align center
 \begin_inset Graphics
 	filename media/<filename>
@@ -616,8 +607,6 @@ status open
 \end_inset
 
 \end_layout
-
-\end_inset
 ```
 
 Scale mapping for `.lyx`: `0.25` → `25text%`, `0.4` → `40text%`, `0.5` → `50text%`, `0.6` → `60text%`, `0.75` → `75text%`
