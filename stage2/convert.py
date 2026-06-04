@@ -374,12 +374,9 @@ def write_tex(elements, out_path: Path, media_dir: Path):
             close_enum()
             lvl = el['level']
             txt = tex_escape(el['text'])
-            if lvl == 'chapter':
-                lines.append(f'\\chapter{{{txt}}}\n')
-            elif lvl == 'section':
-                lines.append(f'\\section{{{txt}}}\n')
-            else:
-                lines.append(f'\\subsection{{{txt}}}\n')
+            cmd = {'chapter': 'chapter', 'section': 'section',
+                   'subsection': 'subsection', 'subsubsection': 'subsubsection'}.get(lvl, 'subsection')
+            lines.append(f'\\{cmd}{{{txt}}}\n')
 
         elif t == 'body':
             close_enum()
@@ -405,6 +402,34 @@ def write_tex(elements, out_path: Path, media_dir: Path):
             lines.append('\\centering\n')
             lines.append(f'\\includegraphics[width={scale}\\textwidth]{{{img_rel}}}\n')
             lines.append('\\end{figure}\n\n')
+
+        elif t == 'list':
+            close_enum()
+            env = 'enumerate' if el.get('ordered') else 'itemize'
+            depth = 0
+            for d, segs in el['items']:
+                while depth < d + 1:
+                    lines.append(f'\\begin{{{env}}}\n')
+                    depth += 1
+                while depth > d + 1:
+                    lines.append(f'\\end{{{env}}}\n')
+                    depth -= 1
+                lines.append(f'\\item {render_tex_segments(segs)}\n')
+            while depth > 0:
+                lines.append(f'\\end{{{env}}}\n')
+                depth -= 1
+            lines.append('\n')
+
+        elif t == 'table':
+            close_enum()
+            rows = el['rows']
+            ncol = max(len(r) for r in rows)
+            lines.append('\\begin{center}\n')
+            lines.append('\\begin{tabular}{|' + 'l|' * ncol + '}\n\\hline\n')
+            for row in rows:
+                row = row + [''] * (ncol - len(row))
+                lines.append(' & '.join(tex_escape(c) for c in row) + ' \\\\\n\\hline\n')
+            lines.append('\\end{tabular}\n\\end{center}\n\n')
 
     close_enum()
     lines.append(r'\end{document}' + '\n')
@@ -964,7 +989,8 @@ def write_lyx(elements, out_path: Path, media_dir: Path, template_dir: Path = No
             close_enum()
             lvl = el['level']
             layout = {'chapter': 'Chapter', 'section': 'Section',
-                      'subsection': 'Subsection'}.get(lvl, 'Section')
+                      'subsection': 'Subsection',
+                      'subsubsection': 'Subsubsection'}.get(lvl, 'Section')
             if lvl == 'chapter' and template_dir is not None:
                 chapter_idx += 1
                 img_name = f'chapterhead_Ch{chapter_idx}.png'
@@ -1011,6 +1037,30 @@ def write_lyx(elements, out_path: Path, media_dir: Path, template_dir: Path = No
             lines.append(f'\tfilename media/{fname}\n')
             lines.append(f'\twidth {scale_pct}text%\n')
             lines.append('\\end_inset\n\n')
+            lines.append('\\end_layout\n\n')
+
+        elif t == 'list':
+            close_enum()
+            layout = 'Enumerate' if el.get('ordered') else 'Itemize'
+            for d, segs in el['items']:
+                lines.append('\\begin_deeper\n' * d)
+                lines.append(f'\\begin_layout {layout}\n')
+                lines.append(render_lyx_segments(segs))
+                lines.append('\n\\end_layout\n\n')
+                lines.append('\\end_deeper\n' * d)
+
+        elif t == 'table':
+            close_enum()
+            rows = el['rows']
+            ncol = max(len(r) for r in rows)
+            tex = ['\\begin{tabular}{|' + 'l|' * ncol + '}', '\\hline']
+            for row in rows:
+                row = row + [''] * (ncol - len(row))
+                tex.append(' & '.join(tex_escape(c) for c in row) + ' \\\\')
+                tex.append('\\hline')
+            tex.append('\\end{tabular}')
+            lines.append('\\begin_layout Standard\n\\align center\n')
+            lines.append(ert(lyx_escape('\n'.join(tex)) + '\n'))
             lines.append('\\end_layout\n\n')
 
     if template_dir is not None:

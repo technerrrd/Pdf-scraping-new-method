@@ -1,4 +1,4 @@
-# CLAUDE.md <!-- version: v3.0 -->
+# CLAUDE.md <!-- version: v4.0 -->
 
 ## Maintenance Rule
 
@@ -17,25 +17,43 @@
 
 ## Pipeline Overview
 
-This project converts EduRev teaching notes (PDF + DOCX pairs) into clean, typeset `.tex` and `.lyx` files. As of **v3.0**, images are scraped full-size from the original EduRev web pages (Stage 0) instead of extracted from the PDF/DOCX, eliminating the half-image splitting that occurred when images straddled a Firefox page break:
+This project converts EduRev teaching notes into clean, typeset `.tex` and `.lyx` files.
+
+**As of v4.0 the primary path is web-only.** The scraped EduRev page is the original
+source the PDF/DOCX were derived from — it is server-rendered (no JS), complete, and
+carries real semantics (h2/h3/h4 headings, `<strong>` bold, `<ul><li>` lists incl.
+nesting, inline full-size images in reading order, tables). Converting it directly is
+more faithful than the PDF path (which lost bullet markers entirely — they survived as
+neither text nor vector graphics, only indentation) and removes the fragile PDF
+machinery (font-size heading guessing, ligature hacks, split-image detection,
+artifact stripping). The PDF is kept **only as a validation oracle**.
 
 ```
-[Input: PDF + DOCX pair  +  CHAPTER-LINKS]
+v4.0 PRIMARY — web-only:
+[Input: input/CHAPTER-LINKS  (+ module PDF, optional, for validation only)]
         ↓
-  Stage 0: Scrape images from web  (NEW in v3.0)
-  (read CHAPTER-LINKS, fetch each chapter's EduRev page,
-   download full-size content images → input/scraped/)
+  stage0/scrape_chapters.py
+  (per chapter URL: fetch + cache HTML → stage2/html_source.parse_html →
+   download inline images → prepend a chapter heading)
         ↓
-  Stage 1: PDF → DOCX
-  (text from PDF; images from input/scraped/ if present,
-   else DOCX zip; produce clean formatted Word document)
+  reuse stage2/convert.py themed writers: write_tex / write_lyx(template)
+  (chapter banners + Legrand theme, real itemize lists, full-size images)
         ↓
-  Stage 2: DOCX → LyX/TeX
-  (parse formatted DOCX, emit .tex and .lyx files
-   ready to open in LyX)
+[Output: combined .tex + .lyx + media/ in stage2/output/<module>/]
         ↓
-[Output: .tex + .lyx files with extracted images]
+  stage0/validate_against_pdf.py  (read-only QA)
+  (per-chapter % of PDF content lines present in the HTML; flags < 95%.
+   NEVER edits/overrides the HTML; skipped if no PDF present)
+
+v3.0 FALLBACK — PDF→DOCX (retained, no longer primary):
+  stage0/scrape_images.py (web images) → stage1/convert_document_v4.py (PDF text +
+  web/DOCX images → DOCX) → stage2/convert.py (DOCX → .tex/.lyx). Use only when a
+  chapter cannot be scraped as HTML.
 ```
+
+**Why both still exist:** v4.0 depends on the page being reachable; the cached HTML
+(`input/scraped/Chapter<N>/page.html`) makes converts reproducible offline, and the
+PDF oracle flags any silent content loss. The v3.0 PDF pipeline remains as a fallback.
 
 **Original projects (DO NOT MODIFY):**
 - Stage 1 source: `/home/anirudh/pdf-conversion/`
@@ -48,37 +66,52 @@ This project converts EduRev teaching notes (PDF + DOCX pairs) into clean, types
 ```
 final-combined-pdf-to-lyx/
 ├── CLAUDE.md
-├── stage0/                    ← web image scraper (NEW in v3.0)
-│   ├── scrape_images.py
+├── stage0/                    ← web scraping + validation
+│   ├── scrape_chapters.py     ← v4.0 PRIMARY: HTML → themed combined .tex/.lyx
+│   ├── validate_against_pdf.py ← v4.0 read-only PDF coverage oracle
+│   ├── scrape_images.py       ← v3.0 fallback: web image scraper
+│   ├── prototype_html_to_content.py ← standalone HTML→tex/lyx demo (reference)
 │   └── logs/
-├── stage1/                    ← PDF → DOCX conversion
+├── stage1/                    ← v3.0 fallback: PDF → DOCX
 │   ├── convert_document_v4.py
-│   ├── analyze_document.py
-│   ├── output/                ← formatted DOCX files land here
+│   ├── analyze_document.py    ← chapter detection (reused by validation oracle)
+│   ├── output/
 │   ├── logs/
-│   └── venv/
-├── stage2/                    ← DOCX → LyX/TeX conversion
-│   ├── convert.py
+│   └── venv/                  ← shared venv (requests, beautifulsoup4, html5lib, …)
+├── stage2/                    ← DOCX/HTML → LyX/TeX
+│   ├── convert.py             ← themed writers (write_tex/write_lyx) + template/banners
+│   ├── html_source.py         ← v4.0 HTML front-end: parse_html() → element dicts
 │   ├── output/                ← .tex, .lyx, media/ land here
 │   └── logs/
-└── input/                     ← drop PDF + DOCX input pairs here
-    ├── CHAPTER-LINKS          ← chapter → EduRev URL map (Stage 0 input)
-    └── scraped/               ← Stage 0 image cache + manifest.json
+├── Final-lyx_template/        ← Legrand LyX theme + assets (banners, structure.tex)
+└── input/                     ← inputs
+    ├── CHAPTER-LINKS          ← chapter → EduRev URL map (primary input)
+    ├── scraped/Chapter<N>/    ← cached page.html (+ v3.0 image cache, manifest.json)
+    └── <module>.pdf/.docx     ← optional; PDF used for validation only
 ```
 
 ### Common Commands
 
 ```bash
-# === STAGE 0 (NEW in v3.0) ===
-# Activate the venv (shared with Stage 1) — needs `requests`
+# Activate the shared venv (requests, beautifulsoup4, html5lib, pymupdf, python-docx, Pillow)
 source stage1/venv/bin/activate
 
+# === v4.0 PRIMARY: web-only ===
+# Build the themed combined .tex/.lyx straight from input/CHAPTER-LINKS
+python stage0/scrape_chapters.py [<module-name>]
+# → stage2/output/<module>/<module>.{tex,lyx} + media/ + chapter banners + theme assets
+
+# Validate the scrape is complete against the module PDF (read-only; skips if no PDF)
+python stage0/validate_against_pdf.py
+# → per-chapter coverage %; flags any chapter < 95% for review
+
+# === v3.0 FALLBACK: PDF → DOCX (only if a chapter can't be scraped) ===
 # Scrape full-size chapter images from EduRev pages listed in input/CHAPTER-LINKS
 python stage0/scrape_images.py
 # → downloads to input/scraped/Chapter<N>/, writes manifest.json, prints per-chapter
 #   counts, then STOPS. Review/prune the images before running Stage 1.
 
-# === STAGE 1 ===
+# === STAGE 1 (fallback) ===
 # Activate Stage 1 venv
 source stage1/venv/bin/activate
 
@@ -96,6 +129,61 @@ python stage2/convert.py
 python stage2/convert.py Chapter12.docx
 python stage2/convert.py Chapter10.docx Chapter11.docx
 ```
+
+---
+
+# v4.0: Web-Only Pipeline (HTML → LyX/TeX)
+
+The primary path. `stage0/scrape_chapters.py` orchestrates; `stage2/html_source.py` is
+the HTML front-end; `stage2/convert.py`'s themed writers are the reused back-end.
+
+## How it works
+1. **Parse `CHAPTER-LINKS`** (reuses `scrape_images.parse_links`) → ordered chapters.
+2. **Fetch + cache** each chapter page to `input/scraped/Chapter<N>/page.html`
+   (`html_source.fetch`) — reproducible offline.
+3. **`html_source.parse_html(html)`** → Stage 2 element dicts, in reading order:
+   - `heading` (h2→section, h3→subsection, h4→subsubsection; leading numbering stripped)
+   - `body` (`<p>` with `(text,bold)` segments from `<strong>`)
+   - `list` **(new element type)** — `<ul>/<ol>`, nested via depth
+   - `image` — `<img …_lg.jpg>` (downloaded; not extracted from a DOCX)
+   - `table` — `<table>` (the auto-TOC table is skipped)
+4. **Prepend a `chapter` heading** per URL, concatenate all chapters.
+5. **Reuse `write_tex` / `write_lyx(template_dir=Final-lyx_template)`** → combined themed
+   `.tex`/`.lyx`; `generate_chapter_image` draws a banner per chapter (keyed by name),
+   `copy_template_assets` copies theme files.
+
+## Key implementation rules (do not regress)
+- **Parse with `html5lib`**, not `html.parser`: EduRev omits closing `</p>`/`</li>` tags;
+  only html5lib applies HTML5 implied-end-tag rules to give a clean sibling tree. With
+  `html.parser` one `<p>` wrongly wraps the whole chapter.
+- **Content scope:** `find_content_root` = smallest ancestor holding ≥80% of the
+  `_lg.jpg` images. Do **not** scope by the visible content `<div>` (`explr_htmlcnt_dv`)
+  — it appears *after* the images in the markup. The `_lg.jpg` path filter cleanly
+  separates content images from page chrome (see v3.0 notes).
+- **Inline spacing:** whitespace-only text nodes between inline tags must be collapsed to
+  a single trailing space, not dropped — otherwise `<strong>active</strong>and` joins to
+  "activeand". (`_segments` / `list_items` handle this.)
+- **Unicode normalization** (`clean_text` + `_UNICODE_MAP`): map thin/zero-width spaces,
+  curly quotes, dashes, and — for science chapters — sub/superscripts and arrows to
+  plain ASCII, since pdflatex's `utf8` rejects them. Values must be plain text (no
+  `$ _ ^ \ {}`) because `tex_escape` runs afterward.
+- **`write_lyx` requires the template** (`Final-lyx_template/main.lyx`) for the theme and
+  for `generate_chapter_image` banners; without it you get a bare standalone book.
+
+## Known limitations / follow-ups
+- **Math & inline sub/superscripts** are flattened to ASCII (e.g. `CO₂`→`CO2`). Formulas
+  on EduRev are images and pass through as images (same as the PDF path — not a
+  regression). Faithful math typesetting (`CO$_2$`, `$\to$`) is a future improvement.
+- **Tables:** these chapter-notes pages have no content tables (only the auto-TOC, which
+  is skipped); the `table` handler exists but is unproven on real content tables.
+- **MCQ:** chapter-notes pages have none; question-bank pages would need MCQ detection in
+  `parse_html` to reuse Stage 2's MCQ writer.
+
+## PDF validation oracle (`stage0/validate_against_pdf.py`)
+Read-only. Uses `analyze_pdf` (Stage 1) for per-chapter PDF page ranges, normalizes both
+sides, and reports the % of PDF content lines (artifacts removed) present in each
+chapter's cached HTML. Flags any chapter < 95%; never edits output; skipped when no PDF
+is in `input/`. Measured on the Class 8 module: 97.7–100% per chapter.
 
 ---
 
